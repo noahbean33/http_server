@@ -7,6 +7,30 @@
 #include <errno.h>
 #include <unistd.h>
 
+char * extract_header_value(char *headers, const char *header_name) 
+{
+	char *line = headers;
+	char * header_start;
+	while ((line = strstr(line, header_name)) != NULL)
+	{
+		header_start = line + strlen(header_name);
+		while(*header_start == ' ' || *header_start == ':')
+		{
+			header_start++;
+		}
+		char *header_end = strstr(header_start, "\r\n");
+		if (header_end) {
+			size_t value_len = header_end - header_start;
+			char *value = malloc(value_len + 1);
+			strncpy(value, header_start, value_len);
+			value[value_len] = '\0';
+			return value;
+		}
+		line++;
+	}
+	return NULL;
+}
+
 int main() {
 	// Disable output buffering
 	setbuf(stdout, NULL);
@@ -87,6 +111,29 @@ int main() {
 		send(client_fd, response, strlen(response), 0);
 
 	}
+	else if (strcmp(http_path, "/user-agent") == 0)
+{
+    // Extract User-Agent header value from the remaining request
+    char *user_agent = extract_header_value(saveptr, "User-Agent");
+    
+    if (user_agent) {
+        size_t content_len = strlen(user_agent);
+        char response[1024];
+        snprintf(response, sizeof(response), 
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %zu\r\n"
+            "\r\n"
+            "%s", 
+            content_len, user_agent);
+        send(client_fd, response, strlen(response), 0);
+        free(user_agent);
+    } else {
+        // No User-Agent header found
+        char *response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(client_fd, response, strlen(response), 0);
+    }
+}
 	else
 	{
 		char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
