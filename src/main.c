@@ -112,28 +112,28 @@ int main() {
 
 	}
 	else if (strcmp(http_path, "/user-agent") == 0)
-{
-    // Extract User-Agent header value from the remaining request
-    char *user_agent = extract_header_value(saveptr, "User-Agent");
-    
-    if (user_agent) {
-        size_t content_len = strlen(user_agent);
-        char response[1024];
-        snprintf(response, sizeof(response), 
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: %zu\r\n"
-            "\r\n"
-            "%s", 
-            content_len, user_agent);
-        send(client_fd, response, strlen(response), 0);
-        free(user_agent);
-    } else {
-        // No User-Agent header found
-        char *response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-        send(client_fd, response, strlen(response), 0);
-    }
-}
+	{
+		// Extract User-Agent header value from the remaining request
+		char *user_agent = extract_header_value(saveptr, "User-Agent");
+		
+		if (user_agent) {
+			size_t content_len = strlen(user_agent);
+			char response[1024];
+			snprintf(response, sizeof(response), 
+				"HTTP/1.1 200 OK\r\n"
+				"Content-Type: text/plain\r\n"
+				"Content-Length: %zu\r\n"
+				"\r\n"
+				"%s", 
+				content_len, user_agent);
+			send(client_fd, response, strlen(response), 0);
+			free(user_agent);
+		} else {
+			// No User-Agent header found
+			char *response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+			send(client_fd, response, strlen(response), 0);
+		}
+	}
 	else
 	{
 		char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
