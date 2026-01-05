@@ -77,6 +77,16 @@ int main() {
 		char *response = "HTTP/1.1 200 OK\r\n\r\n";
 		send(client_fd, response, strlen(response), 0);
 	}
+	else if (strncmp(http_path, "/echo", 6) == 0)
+	{
+		char *content = http_path + 6;
+		size_t content_len = strlen(content);
+		char response[1024];
+		snprintf(response, sizeof(response), "HTTP/1.1 200 OK\r\n" "Content-Type: text/plain\r\n"
+		"Content-Length: %zu\r\n" "\r\n" "%s", content_length, content);
+		send(client_fd, response, strlen(response), 0);
+
+	}
 	else
 	{
 		char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
