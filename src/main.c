@@ -91,10 +91,11 @@ int main() {
 	char *http_method = NULL;
 	char * http_path = NULL;
 	char *saveptr = NULL;
+	char *line_saveptr = NULL;
 
 	http_method = strtok_r(request, "\r\n", &saveptr);
-	http_path = strtok_r(http_method, " ", &saveptr);
-	http_path = strtok_r(NULL, " ", &saveptr);
+	http_path = strtok_r(http_method, " ", &line_saveptr);
+	http_path = strtok_r(NULL, " ", &line_saveptr);
 
 	if (strcmp(http_path, "/") == 0)
 	{
