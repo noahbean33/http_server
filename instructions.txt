@@ -1,66 +1,59 @@
 Your Task
 In-progress
 Share Feedback
-Very easy
-In this stage, your server will respond to an HTTP request with a 200 response.
+Easy
+In this stage, your server will extract the URL path from an HTTP request, and respond with either a 200 or 404, depending on the path.
 
-HTTP response
-An HTTP response is made up of three parts, each separated by a CRLF (\r\n):
+HTTP request
+An HTTP request is made up of three parts, each separated by a CRLF (\r\n):
 
-Status line.
+Request line.
 Zero or more headers, each ending with a CRLF.
-Optional response body.
-In this stage, your server's response will only contain a status line. Here's the response your server must send:
+Optional request body.
+Here's an example of an HTTP request:
 
-HTTP/1.1 200 OK\r\n\r\n
-Here's a breakdown of the response:
+GET /index.html HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/7.64.1\r\nAccept: */*\r\n\r\n
+Here's a breakdown of the request:
 
-// Status line
-HTTP/1.1  // HTTP version
-200       // Status code
-OK        // Optional reason phrase
-\r\n      // CRLF that marks the end of the status line
+// Request line
+GET                          // HTTP method
+/index.html                  // Request target
+HTTP/1.1                     // HTTP version
+\r\n                         // CRLF that marks the end of the request line
 
-// Headers (empty)
-\r\n      // CRLF that marks the end of the headers
+// Headers
+Host: localhost:4221\r\n     // Header that specifies the server's host and port
+User-Agent: curl/7.64.1\r\n  // Header that describes the client's user agent
+Accept: */*\r\n              // Header that specifies which media types the client can accept
+\r\n                         // CRLF that marks the end of the headers
 
-// Response body (empty)
-For more information about HTTP responses, see the MDN Web Docs on HTTP responses or the HTTP/1.1 specification.
+// Request body (empty)
+The "request target" specifies the URL path for this request. In this example, the URL path is /index.html.
+
+Note that each header ends in a CRLF, and the entire header section also ends in a CRLF.
 
 Tests
 The tester will execute your program like this:
 
 $ ./your_program.sh
-The tester will then send an HTTP GET request to your server:
+The tester will then send two HTTP requests to your server.
+
+First, the tester will send a GET request, with a random string as the path:
+
+$ curl -v http://localhost:4221/abcdefg
+Your server must respond to this request with a 404 response:
+
+HTTP/1.1 404 Not Found\r\n\r\n
+Then, the tester will send a GET request, with the path /:
 
 $ curl -v http://localhost:4221
-Your server must respond to the request with the following response:
+Your server must respond to this request with a 200 response:
 
 HTTP/1.1 200 OK\r\n\r\n
 Notes
-You can ignore the contents of the request. We'll cover parsing requests in later stages.
-This challenge uses HTTP/1.1.
-To learn how HTTP works, you'll implement your server from scratch using TCP primitives instead of using C's built-in HTTP libraries.
-How to pass this stage
-Unlike stage 1, your repository doesn't contain commented code to pass this stage.
-
-1
-Write code to pass this stage
-Head over to your editor / IDE and implement your solution.
-
-If you want a quick look at what functions to use or how to structure your code, we recommend looking at Code Examples.
-
-2
-Run tests
-To run tests, make changes to your code and run the following commands:
-
-git
-codecrafters cli
-
-copy
-git add .
-git commit --allow-empty -m "[any message]"
-git push origin master
+You can ignore the headers for now. You'll learn about parsing headers in a later stage.
+In this stage, the request target is written as a URL path. But the request target actually has four possible formats. The URL path format is called the "origin form," and it's the most commonly used format. The other formats are used for more niche scenarios, like sending a request through a proxy.
+For more information about HTTP requests, see the MDN Web Docs on HTTP requests or the HTTP/1.1 specification.
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -69,12 +62,16 @@ git push origin master
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 int main() {
   // Disable output buffering
   setbuf(stdout, NULL);
   setbuf(stderr, NULL);
+
+  // You can use print statements as follows for debugging, they'll be visible
+  // when running tests. printf("Logs from your program will appear here!\n");
 
   int server_fd, client_addr_len;
   struct sockaddr_in client_addr;
@@ -85,49 +82,63 @@ int main() {
     return 1;
   }
 
-  // the tester of codecracker will restart the program quite a bit, so we will
-  // make the address reusable
+  // Since the tester restarts your program quite often, setting SO_REUSEADDR
+  // ensures that we don't run into 'Address already in use' errors
   int reuse = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) ==
-      -1) {
+  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
+      0) {
     printf("SO_REUSEADDR failed: %s \n", strerror(errno));
     return 1;
   }
 
-  struct sockaddr_in serv_addr = {.sin_family = AF_INET,
-                                  .sin_port = htons(4221),
-                                  .sin_addr = {.s_addr = htonl(INADDR_ANY)}};
+  struct sockaddr_in serv_addr = {
+      .sin_family = AF_INET,
+      .sin_port = htons(4221),
+      .sin_addr = {htonl(INADDR_ANY)},
+  };
 
   if (bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0) {
-    printf("Bind failed: %s\n", strerror(errno));
+    printf("Bind failed: %s \n", strerror(errno));
     return 1;
   }
 
   int connection_backlog = 5;
   if (listen(server_fd, connection_backlog) != 0) {
-    printf("Listen failed: %s\n", strerror(errno));
+    printf("Listen failed: %s \n", strerror(errno));
     return 1;
   }
 
-  printf("Waiting for a client to connect ...");
-
+  printf("Waiting for a client to connect...\n");
   client_addr_len = sizeof(client_addr);
 
-  int client_fd = accept(server_fd, (struct sockaddr *)&client_addr,
-                         (socklen_t *)&client_addr_len);
+  int client_fd =
+      accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+  printf("Client connected\n");
 
-  if (client_fd == -1) {
-    printf("Accept failed: %s", strerror(errno));
-    close(client_fd);
-    return 1;
+  char request[1024];
+  ssize_t bytes_read = recv(client_fd, request, sizeof(request), 0);
+  if (bytes_read != 0) {
+    // We read the request
+    char *http_method = NULL;
+    char *http_path = NULL;
+    char *http_headers = NULL;
+    char *request_body = NULL;
+    char *saveptr = NULL;
+
+    http_method = strtok_r(request, "\r\n", &saveptr);
+    http_path = strtok_r(http_method, " ", &saveptr);
+    http_path = strtok_r(NULL, " ", &saveptr);
+    if (strcmp(http_path, "/") == 0) {
+      char message[1024] = "HTTP/1.1 200 OK\r\n\r\n";
+      send(client_fd, message, strlen(message), 0);
+    } else {
+      char message[1024] = "HTTP/1.1 404 Not Found\r\n\r\n";
+      send(client_fd, message, strlen(message), 0);
+    }
   }
 
-  printf("Client is connected");
-
-  char *res = "HTTP/1.1 200 OK\r\n\r\n";
-  send(client_fd, res, strlen(res), MSG_CONFIRM);
-
   close(server_fd);
+  close(client_fd);
 
   return 0;
 }

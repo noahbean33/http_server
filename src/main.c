@@ -61,8 +61,27 @@ int main() {
 	}
 	printf("Client connected\n");
 	
-	char *res = "HTTP/1.1 200 OK\r\n\r\n";
-	send(client_fd, res, strlen(res), 0);
+	char request[1024];
+	ssize_t bytes_read = recv(client_fd, request, sizeof(request), 0);
+
+	char *http_method = NULL;
+	char * http_path = NULL;
+	char *saveptr = NULL;
+
+	http_method = strtok_r(request, "\r\n", &saveptr);
+	http_path = strtok_r(http_method, " ", &saveptr);
+	http_path = strtok_r(NULL, " ", &saveptr);
+
+	if (strcmp(http_path, "/") == 0)
+	{
+		char *response = "HTTP/1.1 200 OK\r\n\r\n";
+		send(client_fd, response, strlen(response), 0);
+	}
+	else
+	{
+		char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
+		send(client_fd, response, strlen(response), 0);
+	}
 	close(client_fd);
 
 	return 0;
