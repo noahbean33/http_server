@@ -2,230 +2,236 @@ Your Task
 In-progress
 Share Feedback
 Easy
-In this stage, you'll implement the /user-agent endpoint, which reads the User-Agent request header and returns it in the response body.
+In this stage, you'll add support for concurrent connections.
 
-The User-Agent header
-The User-Agent header describes the client's user agent.
-
-Your /user-agent endpoint must read the User-Agent header, and return it in your response body. Here's an example of a /user-agent request:
-
-// Request line
-GET
-/user-agent
-HTTP/1.1
-\r\n
-
-// Headers
-Host: localhost:4221\r\n
-User-Agent: foobar/1.2.3\r\n  // Read this value
-Accept: */*\r\n
-\r\n
-
-// Request body (empty)
-Here is the expected response:
-
-// Status line
-HTTP/1.1 200 OK               // Status code must be 200
-\r\n
-
-// Headers
-Content-Type: text/plain\r\n
-Content-Length: 12\r\n
-\r\n
-
-// Response body
-foobar/1.2.3                  // The value of `User-Agent`
 Tests
 The tester will execute your program like this:
 
 $ ./your_program.sh
-The tester will then send a GET request to the /user-agent endpoint on your server. The request will have a User-Agent header.
+Then, the tester will create multiple concurrent TCP connections to your server. (The exact number of connections is determined at random.) After that, the tester will send a single GET request through each of the connections.
 
-$ curl -v --header "User-Agent: foobar/1.2.3" http://localhost:4221/user-agent
-Your server must respond with a 200 response that contains the following parts:
+$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
+$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
+$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
+Your server must respond to each request with the following response:
 
-Content-Type header set to text/plain.
-Content-Length header set to the length of the User-Agent value.
-Message body set to the User-Agent value.
-HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nfoobar/1.2.3
-Notes
-Header names are case-insensitive.
+HTTP/1.1 200 OK\r\n\r\n
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/socket.h>
+#include "parser.h"
+#include "vector.h"
+#include <errno.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <errno.h>
+#include <strings.h>
+#include <sys/socket.h>
 #include <unistd.h>
-#include "util.h"
-#include "request.h"
-#define RES_SIZE 2048
 
-char *defined_headers[] = {"Content-Type", "Host", "User-Agent", "Accept", "Content-Length"};
-typedef struct response
-{
-	char *http_ver;
-	int code;
-	char *message;
-	char **headers;
-	char *body;
-} Response;
+#define BLOCK 4096
 
-Response *new_response()
-{
-	Response *res = (Response *)malloc(sizeof(Response));
-	res->http_ver = "HTTP/1.1";
-	res->headers = (char **)calloc(HEADER_LEN, sizeof(char *));
-	return res;
+int setup_server(int *server_fd, int *client_fd, int *client_addr_len,
+                 struct sockaddr_in *client_addr) {
+
+  //
+  *server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (*server_fd == -1) {
+    printf("Socket creation failed: %s...\n", strerror(errno));
+    exit(1);
+  }
+  //
+  // // Since the tester restarts your program quite often, setting SO_REUSEADDR
+  // // ensures that we don't run into 'Address already in use' errors
+  int reuse = 1;
+  if (setsockopt(*server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
+      0) {
+    printf("SO_REUSEADDR failed: %s \n", strerror(errno));
+    return 1;
+  }
+  //
+  struct sockaddr_in serv_addr = {
+      .sin_family = AF_INET,
+      .sin_port = htons(4221),
+      .sin_addr = {htonl(INADDR_ANY)},
+  };
+  //
+  if (bind(*server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0) {
+    printf("Bind failed: %s \n", strerror(errno));
+    return 1;
+  }
+  //
+  int connection_backlog = 5;
+  if (listen(*server_fd, connection_backlog) != 0) {
+    printf("Listen failed: %s \n", strerror(errno));
+    return 1;
+  }
+  //
+  printf("Waiting for a client to connect...\n");
+  *client_addr_len = sizeof(*client_addr);
+
+  return 0;
 }
 
-char *toString(Response *res)
-{
-	char *resp_str = (char *)calloc(RES_SIZE, sizeof(char));
-	sprintf(resp_str, "%s %d %s\r\n", res->http_ver, res->code, res->message);
-	char header[40];
-	for (int i = 0; i < HEADER_LEN; i++)
-	{
-		if (res->headers[i])
-		{
-			sprintf(header, "%s: %s\r\n", defined_headers[i], res->headers[i]);
-			strcat(resp_str, header);
-		}
-	}
-	strcat(resp_str, "\r\n");
-	if (res->body)
-		strcat(resp_str, res->body);
-	return resp_str;
+int send_response(int fd, const dynarr *arr) {
+  int sb = send(fd, arr->ptr, arr->len, 0);
+  // printf("no of bytes sent %d\r\n", sb);
+  // printf("%s", arr->ptr);
 }
 
-void write_to_res(Response *res, char *content)
-{
-	res->headers[get_header_idx("Content-Type")] = "text/plain";
-	char *len = (char *)calloc(10, sizeof(char));
-	sprintf(len, "%d", (int)strlen(content));
-	res->headers[get_header_idx("Content-Length")] = len;
-	res->body = content;
+int append_crlf(const dynarr *arr) {
+  char *crlf = "\r\n";
+  return dyn_push(arr, crlf, strlen(crlf));
 }
 
-void router(Request *req, int conn)
-{
-	int m = strlen(req->method);
-	int n = strlen(req->url);
-	char *action = (char *)calloc(m + n + 2, sizeof(char));
-	strcpy(action, req->method);
-	action[m] = ' ';
-	action[m + 1] = '\0';
-	strcat(action, req->url);
-	printf("action %s\n", action);
-	Response *res = new_response();
-	if (strcmp(action, "GET /") == 0)
-	{
-		res->code = 200;
-		res->message = "OK";
-		char *resp_str = toString(res);
-		write(conn, resp_str, strlen(resp_str));
-	}
-	else if (strncmp(action, "GET /echo/", 10) == 0)
-	{
-		char params_id[40];
-		strcpy(params_id, action + 10);
-		res->code = 200;
-		res->message = "OK";
-		write_to_res(res, params_id);
-		char *resp_str = toString(res);
-		write(conn, resp_str, strlen(resp_str));
-	}
-	else if (strcmp(action, "GET /user-agent") == 0)
-	{
-		res->code = 200;
-		res->message = "OK";
-		write_to_res(res, req->headers[get_header_idx("User-Agent")]);
-		char *resp_str = toString(res);
-		write(conn, resp_str, strlen(resp_str));
-	}
-	else
-	{
-		res->code = 404;
-		res->message = "Not Found";
-		char *resp_str = toString(res);
-		write(conn, resp_str, strlen(resp_str));
-	}
-	free(res);
+bool has_crlfcrlf(const char *buf, ssize_t len) {
+  if (len < 4) {
+    return false;
+  }
+
+  for (size_t i = 0; i + 3 < len; i++) {
+    if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' &&
+        buf[i + 3] == '\n') {
+      return true;
+    }
+  }
+
+  return false;
 }
 
-int main()
-{
-	// Disable output buffering
-	setbuf(stdout, NULL);
-	setbuf(stderr, NULL);
+ssize_t find_header_end(const char *buf, size_t len) {
 
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	printf("Logs from your program will appear here!\n");
+  for (size_t i = 0; i + 3 < len; i++) {
+    if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' &&
+        buf[i + 3] == '\n') {
+      return (ssize_t)(i + 4);
+    }
+  }
 
-	// Uncomment this block to pass the first stage
+  return -1;
+}
 
-	int server_fd, client_addr_len;
-	struct sockaddr_in client_addr;
+size_t parse_content_length(const char *buf, size_t header_end) {
+  const char *p = buf;
+  const char *end = buf + header_end;
 
-	server_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (server_fd == -1)
-	{
-		printf("Socket creation failed: %s...\n", strerror(errno));
-		return 1;
-	}
+  while (p < end) {
+    if (strncasecmp(p, "Content-Length:", 15) == 0) {
+      p += 15;
+      while (*p == ' ' || *p == '\t')
+        p++;
+      return (size_t)strtoul(p, NULL, 10);
+    }
 
-	// Since the tester restarts your program quite often, setting SO_REUSEADDR
-	// ensures that we don't run into 'Address already in use' errors
-	int reuse = 1;
-	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0)
-	{
-		printf("SO_REUSEADDR failed: %s \n", strerror(errno));
-		return 1;
-	}
+    const char *nl = memchr(p, '\n', end - p);
+    if (!nl)
+      break;
+    p = nl + 1;
+  }
 
-	struct sockaddr_in serv_addr = {
-			.sin_family = AF_INET,
-			.sin_port = htons(4221),
-			.sin_addr = {htonl(INADDR_ANY)},
-	};
+  return 0;
+}
 
-	if (bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0)
-	{
-		printf("Bind failed: %s \n", strerror(errno));
-		return 1;
-	}
+int read_req(dynarr *req, int server_fd) {
 
-	int connection_backlog = 5;
-	if (listen(server_fd, connection_backlog) != 0)
-	{
-		printf("Listen failed: %s \n", strerror(errno));
-		return 1;
-	}
+  char buf[BLOCK];
 
-	printf("Waiting for a client to connect...\n");
-	client_addr_len = sizeof(client_addr);
+  while (1) {
+    ssize_t bytes_read = recv(server_fd, buf, sizeof(buf), 0);
 
-	int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-	printf("Client connected\n");
-	char *ok_msg = "HTTP/1.1 200 OK\r\n\r\n";
-	char req_str[2048];
-	read(client_fd, req_str, 2048);
-	Request *req = parse_request(req_str);
-	if (req)
-	{
-		printf("Request: \n\tmethod: %s, url: %s\n", req->method, req->url);
-		printf("\tHeader: ");
-		disp_arr(req->headers, HEADER_LEN);
-		printf("\n\tBody: %s\n", req->body);
-	}
-	else
-	{
-		printf("Error parsing request");
-	}
-	router(req, client_fd);
-	close(server_fd);
+    if (bytes_read == 0) {
+      break;
+    }
 
-	return 0;
+    if (bytes_read == -1) {
+      break;
+    }
+
+    dyn_push(req, buf, bytes_read);
+    // printf("req is %s\n", req->ptr);
+
+    if (has_crlfcrlf(req->ptr, req->len)) {
+      break;
+    }
+  }
+
+  // printf("did we break");
+
+  ssize_t header_end = find_header_end(req->ptr, req->len);
+  if (header_end < 0)
+    return -1;
+
+  size_t body_len = parse_content_length(req->ptr, header_end);
+
+  while (req->len < (size_t)header_end + body_len) {
+    ssize_t n = recv(server_fd, buf, sizeof(buf), 0);
+
+    if (n <= 0)
+      return -1;
+
+    if (dyn_push(req, buf, n) < 0)
+      return -1;
+  }
+
+  return 1;
+}
+
+void *handle_client(void *arg) {
+  int client_fd = *(int *)arg;
+  free(arg); // allocated in main thread
+
+  dynarr req, resp;
+  dynarr_init(&req, 1);
+  dynarr_init(&resp, 1);
+
+  if (read_req(&req, client_fd) > 0) {
+    parse_http_req(&resp, &req);
+    send_response(client_fd, &resp);
+  }
+
+  free_dynarr(&req);
+  free_dynarr(&resp);
+  close(client_fd);
+
+  return NULL;
+}
+
+int main() {
+  // Disable output buffering
+  setbuf(stdout, NULL);
+  setbuf(stderr, NULL);
+
+  // You can use print statements as follows for debugging, they'll be visible
+  // when running tests.
+  printf("Logs from your program will appear here!\n");
+
+  int server_fd, client_fd, client_addr_len;
+  struct sockaddr_in client_addr;
+
+  if (setup_server(&server_fd, &client_fd, &client_addr_len, &client_addr) ==
+      1) {
+    close(server_fd);
+    return 1;
+  }
+
+  while (1) {
+    // socklen_t client_addr_len = sizeof(client_addr);
+
+    int client_fd =
+        accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+
+    if (client_fd < 0)
+      continue;
+
+    pthread_t tid;
+
+    int *pclient = malloc(sizeof(int));
+    *pclient = client_fd;
+
+    pthread_create(&tid, NULL, handle_client, pclient);
+    pthread_detach(tid); // no need to join
+  }
+  return 0;
 }
