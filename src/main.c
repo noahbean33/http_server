@@ -8,6 +8,11 @@
 #include <unistd.h>
 #include <pthread.h>
 
+typedef struct {
+	int client_fd;
+	char *directory;
+} client_data_t;
+
 char * extract_header_value(char *headers, const char *header_name) 
 {
 	char *line = headers;
@@ -33,8 +38,10 @@ char * extract_header_value(char *headers, const char *header_name)
 }
 
 void *handle_client(void *arg) {
-	int client_fd = *(int *)arg;
-	free(arg);
+	client_data_t *data = (client_data_t *)arg;
+	int client_fd = data->client_fd;
+	char *directory = data->directory;
+	free(data);
 	
 	char request[1024];
 	ssize_t bytes_read = recv(client_fd, request, sizeof(request), 0);
@@ -88,6 +95,44 @@ void *handle_client(void *arg) {
 			send(client_fd, response, strlen(response), 0);
 		}
 	}
+	else if (strncmp(http_path, "/files/", 7) == 0 && directory != NULL)
+	{
+		char *filename = http_path + 7;
+		
+		char filepath[1024];
+		size_t dir_len = strlen(directory);
+		if (dir_len > 0 && directory[dir_len - 1] == '/') {
+			snprintf(filepath, sizeof(filepath), "%s%s", directory, filename);
+		} else {
+			snprintf(filepath, sizeof(filepath), "%s/%s", directory, filename);
+		}
+		
+		FILE *file = fopen(filepath, "rb");
+		if (file) {
+			fseek(file, 0, SEEK_END);
+			long file_size = ftell(file);
+			fseek(file, 0, SEEK_SET);
+			
+			char *file_content = malloc(file_size);
+			fread(file_content, 1, file_size, file);
+			fclose(file);
+			
+			char response[2048];
+			int header_len = snprintf(response, sizeof(response),
+				"HTTP/1.1 200 OK\r\n"
+				"Content-Type: application/octet-stream\r\n"
+				"Content-Length: %ld\r\n"
+				"\r\n",
+				file_size);
+			
+			send(client_fd, response, header_len, 0);
+			send(client_fd, file_content, file_size, 0);
+			free(file_content);
+		} else {
+			char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
+			send(client_fd, response, strlen(response), 0);
+		}
+	}
 	else
 	{
 		char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
@@ -98,10 +143,16 @@ void *handle_client(void *arg) {
 	return NULL;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
 	// Disable output buffering
 	setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
+
+	// Parse command-line arguments for directory flag
+	char *directory = NULL;
+	if (argc >= 3 && strcmp(argv[1], "--directory") == 0) {
+		directory = argv[2];
+	}
 
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	printf("Logs from your program will appear here!\n");
@@ -155,13 +206,14 @@ int main() {
 		
 		// Create a new thread for this client
 		pthread_t thread_id;
-		int *pclient = malloc(sizeof(int));
-		*pclient = client_fd;
+		client_data_t *data = malloc(sizeof(client_data_t));
+		data->client_fd = client_fd;
+		data->directory = directory;
 		
-		if (pthread_create(&thread_id, NULL, handle_client, pclient) != 0) {
+		if (pthread_create(&thread_id, NULL, handle_client, data) != 0) {
 			printf("Failed to create thread\n");
 			close(client_fd);
-			free(pclient);
+			free(data);
 			continue;
 		}
 		

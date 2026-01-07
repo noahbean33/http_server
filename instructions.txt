@@ -1,237 +1,457 @@
 Your Task
 In-progress
 Share Feedback
-Easy
-In this stage, you'll add support for concurrent connections.
+Medium
+In this stage, you'll implement the /files/{filename} endpoint, which returns a requested file to the client.
 
 Tests
-The tester will execute your program like this:
+The tester will execute your program with a --directory flag. The --directory flag specifies the directory where the files are stored, as an absolute path.
 
-$ ./your_program.sh
-Then, the tester will create multiple concurrent TCP connections to your server. (The exact number of connections is determined at random.) After that, the tester will send a single GET request through each of the connections.
+$ ./your_program.sh --directory /tmp/
+The tester will then send two GET requests to the /files/{filename} endpoint on your server.
 
-$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
-$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
-$ (sleep 3 && printf "GET / HTTP/1.1\r\n\r\n") | nc localhost 4221 &
-Your server must respond to each request with the following response:
+Your response should depend on whether {filename} exists in the directory specified by --directory.
 
-HTTP/1.1 200 OK\r\n\r\n
+First request
+The first request will ask for a file that exists in the files directory:
 
-#include "parser.h"
-#include "vector.h"
+$ echo -n 'Hello, World!' > /tmp/foo
+$ curl -i http://localhost:4221/files/foo
+Your server must respond with a 200 response that contains the following parts:
+
+Content-Type header set to application/octet-stream.
+Content-Length header set to the size of the file, in bytes.
+Response body set to the file contents.
+HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 13\r\n\r\nHello, World!
+Second request
+The second request will ask for a file that doesn't exist in the files directory:
+
+$ curl -i http://localhost:4221/files/non_existant_file
+Your server must respond with a 404 response:
+
+HTTP/1.1 404 Not Found\r\n\r\n
+
+View Code Examples
+
+View Screencasts
+Test Runner:
+Tests failed.
+
+View Instructions
+Hints
+Filter by C
+
+avatar
+Write
+Preview
+Found an interesting resource? Share it with the community.
+Markdown supported.
+Comment
+avatar
+ryan-gang
+2 years ago
+Just FYI the tests expect the Content-Length header.
+
+
+135
+
+
+reply
+avatar
+tinytechnicaltutorials
+2 years ago
+When tests run for earlier stages, they will fail if your code requires the --directory flag to start the program. Don't make it "required=True" in this stage.
+
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <pthread.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <zlib.h>
 
-#define BLOCK 4096
+#define PORT 4221
+#define BUFFER_SIZE 2048
 
-int setup_server(int *server_fd, int *client_fd, int *client_addr_len,
-                 struct sockaddr_in *client_addr) {
+// HTTP response codes
+#define HTTP_200_OK "HTTP/1.1 200 OK\r\n"
+#define HTTP_404_NOT_FOUND "HTTP/1.1 404 Not Found\r\n"
+#define HTTP_201_CREATED "HTTP/1.1 201 Created\r\n"
 
-  //
-  *server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (*server_fd == -1) {
-    printf("Socket creation failed: %s...\n", strerror(errno));
-    exit(1);
-  }
-  //
-  // // Since the tester restarts your program quite often, setting SO_REUSEADDR
-  // // ensures that we don't run into 'Address already in use' errors
-  int reuse = 1;
-  if (setsockopt(*server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
-      0) {
-    printf("SO_REUSEADDR failed: %s \n", strerror(errno));
-    return 1;
-  }
-  //
-  struct sockaddr_in serv_addr = {
-      .sin_family = AF_INET,
-      .sin_port = htons(4221),
-      .sin_addr = {htonl(INADDR_ANY)},
-  };
-  //
-  if (bind(*server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0) {
-    printf("Bind failed: %s \n", strerror(errno));
-    return 1;
-  }
-  //
-  int connection_backlog = 5;
-  if (listen(*server_fd, connection_backlog) != 0) {
-    printf("Listen failed: %s \n", strerror(errno));
-    return 1;
-  }
-  //
-  printf("Waiting for a client to connect...\n");
-  *client_addr_len = sizeof(*client_addr);
+// HTTP response headers
+#define CONTENT_TYPE_TEXT "Content-Type: text/plain\r\n"
+#define CONTENT_TYPE_APP "Content-Type: application/octet-stream\r\n"
+#define CONTENT_ENCODING "Content-Encoding: gzip\r\n"
+#define CONTENT_LENGTH "Content-Length: %lu\r\n"
 
-  return 0;
-}
+void process_request(int argc, char *argv[], int client_fd, char *request,
+                     char *res, bool directory);
+char *extract_header_value(char *request, char *header);
+void get_file(int client_fd, char *path, char *directory, char *res,
+              bool encode);
+void create_file(int client_fd, char *path, char *directory, char *res,
+                 char *request);
+int gzip_compress(char *dest, size_t dest_len, char *source);
+void send_buffer(int client_fd, char *buffer, size_t buffer_size);
+void send_response(int client_fd, char *response_code, size_t headers_num,
+                   char *headers[], size_t content_length, char *content,
+                   bool encode);
 
-int send_response(int fd, const dynarr *arr) {
-  int sb = send(fd, arr->ptr, arr->len, 0);
-  // printf("no of bytes sent %d\r\n", sb);
-  // printf("%s", arr->ptr);
-}
+// TODO use gnu getopt to parse command line arguments in main
+// TODO implement or a rudimentary request parser instead of dong it within
+// process_request
+int main(int argc, char *argv[]) {
+  // Check if any option was passed (directory), and if it was valid
+  bool directory;
+  if (argc >= 3 && strcmp(argv[1], "--directory") == 0) {
+    directory = true;
 
-int append_crlf(const dynarr *arr) {
-  char *crlf = "\r\n";
-  return dyn_push(arr, crlf, strlen(crlf));
-}
-
-bool has_crlfcrlf(const char *buf, ssize_t len) {
-  if (len < 4) {
-    return false;
-  }
-
-  for (size_t i = 0; i + 3 < len; i++) {
-    if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' &&
-        buf[i + 3] == '\n') {
-      return true;
+    // Chech if the directory is valid
+    size_t dir_len = strlen(argv[2]);
+    if ((dir_len > 0 && argv[2][dir_len - 1] == '/')) {
+      printf("Directory option good.\n");
+    } else {
+      fprintf(stderr,
+              "\033[31mInvalid directory. Ingoring the argument.\033[0m\n");
+      directory = false;
     }
+  } else {
+    directory = false;
   }
 
-  return false;
-}
-
-ssize_t find_header_end(const char *buf, size_t len) {
-
-  for (size_t i = 0; i + 3 < len; i++) {
-    if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' &&
-        buf[i + 3] == '\n') {
-      return (ssize_t)(i + 4);
-    }
-  }
-
-  return -1;
-}
-
-size_t parse_content_length(const char *buf, size_t header_end) {
-  const char *p = buf;
-  const char *end = buf + header_end;
-
-  while (p < end) {
-    if (strncasecmp(p, "Content-Length:", 15) == 0) {
-      p += 15;
-      while (*p == ' ' || *p == '\t')
-        p++;
-      return (size_t)strtoul(p, NULL, 10);
-    }
-
-    const char *nl = memchr(p, '\n', end - p);
-    if (!nl)
-      break;
-    p = nl + 1;
-  }
-
-  return 0;
-}
-
-int read_req(dynarr *req, int server_fd) {
-
-  char buf[BLOCK];
-
-  while (1) {
-    ssize_t bytes_read = recv(server_fd, buf, sizeof(buf), 0);
-
-    if (bytes_read == 0) {
-      break;
-    }
-
-    if (bytes_read == -1) {
-      break;
-    }
-
-    dyn_push(req, buf, bytes_read);
-    // printf("req is %s\n", req->ptr);
-
-    if (has_crlfcrlf(req->ptr, req->len)) {
-      break;
-    }
-  }
-
-  // printf("did we break");
-
-  ssize_t header_end = find_header_end(req->ptr, req->len);
-  if (header_end < 0)
-    return -1;
-
-  size_t body_len = parse_content_length(req->ptr, header_end);
-
-  while (req->len < (size_t)header_end + body_len) {
-    ssize_t n = recv(server_fd, buf, sizeof(buf), 0);
-
-    if (n <= 0)
-      return -1;
-
-    if (dyn_push(req, buf, n) < 0)
-      return -1;
-  }
-
-  return 1;
-}
-
-void *handle_client(void *arg) {
-  int client_fd = *(int *)arg;
-  free(arg); // allocated in main thread
-
-  dynarr req, resp;
-  dynarr_init(&req, 1);
-  dynarr_init(&resp, 1);
-
-  if (read_req(&req, client_fd) > 0) {
-    parse_http_req(&resp, &req);
-    send_response(client_fd, &resp);
-  }
-
-  free_dynarr(&req);
-  free_dynarr(&resp);
-  close(client_fd);
-
-  return NULL;
-}
-
-int main() {
   // Disable output buffering
   setbuf(stdout, NULL);
   setbuf(stderr, NULL);
 
-  // You can use print statements as follows for debugging, they'll be visible
-  // when running tests.
-  printf("Logs from your program will appear here!\n");
+  int server_fd;
+  server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd == -1) {
+    fprintf(stderr, "\033[31mSocket creation failed: %s\033[0m\n",
+            strerror(errno));
+    return 1;
+  }
 
-  int server_fd, client_fd, client_addr_len;
-  struct sockaddr_in client_addr;
+  // Ensures no 'Address already in use' errors when restarting program multiple
+  // times
+  int reuse = 1;
+  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) ==
+      -1) {
+    fprintf(stderr, "\033[31mSO_REUSEPORT failed: %s\033[0m\n",
+            strerror(errno));
+    return 1;
+  }
 
-  if (setup_server(&server_fd, &client_fd, &client_addr_len, &client_addr) ==
-      1) {
-    close(server_fd);
+  struct sockaddr_in serv_addr = {
+      .sin_family = AF_INET,
+      .sin_port = htons(PORT),
+      .sin_addr = {htonl(INADDR_ANY)},
+  };
+
+  if (bind(server_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) != 0) {
+    fprintf(stderr, "\033[31mBind failed: %s\033[0m\n", strerror(errno));
+    return 1;
+  }
+
+  int connection_backlog = 10;
+  if (listen(server_fd, connection_backlog) != 0) {
+    fprintf(stderr, "\033[31mLalalalala Listen failed: %s\033[0m\n",
+            strerror(errno));
     return 1;
   }
 
   while (1) {
-    // socklen_t client_addr_len = sizeof(client_addr);
+    struct sockaddr_in client_addr;
+    socklen_t client_addr_len = sizeof(client_addr);
+
+    printf("Waiting for a client to connect...\n");
 
     int client_fd =
         accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+    if (client_fd == -1) {
+      fprintf(stderr, "\033[31mFailed to connect: %s\033[0m\n",
+              strerror(errno));
+      return 1; // TODO handle failed connections in a way that doesn't crash
+                // the server in case of an error
+    }
 
-    if (client_fd < 0)
-      continue;
+    printf("Client connected\n");
 
-    pthread_t tid;
+    char request[BUFFER_SIZE];
+    char res[BUFFER_SIZE];
 
-    int *pclient = malloc(sizeof(int));
-    *pclient = client_fd;
+    if (!fork()) {
+      // Fill buffer with received message
+      ssize_t bytes_received = recv(client_fd, request, BUFFER_SIZE - 1, 0);
+      if (bytes_received == -1) {
+        fprintf(stderr, "\033[31mReceive failed: %s\033[0m\n", strerror(errno));
+        close(client_fd);
+        exit(1);
+      }
 
-    pthread_create(&tid, NULL, handle_client, pclient);
-    pthread_detach(tid); // no need to join
+      // Process request and send response
+      close(server_fd);
+      request[bytes_received] = '\0';
+      process_request(argc, argv, client_fd, request, res, directory);
+
+      close(client_fd);
+      exit(0);
+    }
+    close(client_fd);
   }
+
+  close(server_fd);
   return 0;
+}
+
+void process_request(int argc, char *argv[], int client_fd, char *request,
+                     char *res, bool directory) {
+  // To encode or not to encode
+  bool encode = false;
+  char *ae = extract_header_value(request, "Accept-Encoding:");
+  char *needle;
+  if (ae != NULL && (needle = strstr(ae, "gzip")) != NULL) {
+    // Check if the encoding option is really gzip and not gzipsomething
+    if (needle[4] == '\0' || needle[4] == ',') {
+      encode = true;
+    }
+  }
+
+  char *final_content;
+
+  // Extract path from GET request
+  char *path;
+  char *request_tail; // Points to the rest of the request char array after each
+                      // tokenize
+  char *method;
+  method = strtok_r(request, " ", &request_tail);
+  path = strtok_r(NULL, " ", &request_tail);
+
+  // Respond based on path
+  if (strcmp(path, "/") == 0) {
+    // build_response(res, BUFFER_SIZE, HTTP_200_OK, "\r\n", "", false);
+    send_response(client_fd, HTTP_200_OK, 0, NULL, 1, "", false);
+
+  } else if (strncmp(path, "/echo/", 6) == 0) {
+    // Extract content
+    char *content = strtok(path, "/");
+    content = strtok(NULL, "/");
+
+    // In case the path was /echo/, which leads to segfault
+    if (content == NULL) {
+      // Treat it as an echo with empty content
+      char *headers[] = {CONTENT_TYPE_TEXT};
+      send_response(client_fd, HTTP_200_OK, 1, headers, 0, "", false);
+    } else {
+      char *headers[] = {CONTENT_TYPE_TEXT};
+      send_response(client_fd, HTTP_200_OK, 1, headers, strlen(content),
+                    content, encode);
+    }
+
+  } else if (strcmp(path, "/user-agent") == 0) {
+    char *user_agent = extract_header_value(request_tail, "User-Agent:");
+    char *headers[] = {CONTENT_TYPE_TEXT};
+    send_response(client_fd, HTTP_200_OK, 1, headers, strlen(user_agent),
+                  user_agent, encode);
+
+  } else if (strncmp(path, "/files/", 7) == 0 && strcmp(method, "GET") == 0 &&
+             directory) {
+    get_file(client_fd, path, argv[2], res, encode);
+
+  } else if (strncmp(path, "/files/", 7) == 0 && strcmp(method, "POST") == 0 &&
+             directory) {
+    create_file(client_fd, path, argv[2], res, request_tail);
+
+  } else {
+    send_response(client_fd, HTTP_404_NOT_FOUND, 0, NULL, 1, "", false);
+  }
+}
+
+void create_file(int client_fd, char *path, char *directory, char *res,
+                 char *request) {
+  // Extract filename
+  char *file = strtok(path, "/");
+  file = strtok(NULL, "/");
+
+  // Full path
+  char directory_full[BUFFER_SIZE];
+  size_t dir_len = strlen(directory);
+  snprintf(directory_full, sizeof(directory_full), "%s%s", directory, file);
+
+  // Extract content
+  char *body = strstr(request, "\r\n\r\n");
+  if (body != NULL) {
+    body += 4; // Move past the "\r\n\r\n" sequence
+  } else {
+    body = "";
+  }
+
+  FILE *fh;
+  fh = fopen(directory_full, "a");
+  if (fh == NULL) {
+    send_response(client_fd, HTTP_404_NOT_FOUND, 0, NULL, 0, "", false);
+    fprintf(stderr, "\033[31mInvalid directory.\033[0m\n");
+    exit(1);
+  }
+  fprintf(fh, "%s", body);
+  fclose(fh);
+
+  send_response(client_fd, HTTP_201_CREATED, 0, NULL, 0, "", false);
+}
+
+// TODO use malloc to allocate enough memory, instead of truncating after
+// BUFFER_SIZE
+void get_file(int client_fd, char *path, char *directory, char *res,
+              bool encode) {
+  // Extract filename
+  char *file = strtok(path, "/");
+  file = strtok(NULL, "/");
+
+  // Full path
+  char directory_full[BUFFER_SIZE];
+  snprintf(directory_full, BUFFER_SIZE, "%s%s", directory, file);
+
+  // Open file
+  FILE *fh;
+  fh = fopen(directory_full, "r");
+  if (fh != NULL) {
+    // Read the file into a temporary buffer.
+    char file_buffer[BUFFER_SIZE];
+    size_t bytes_read = fread(file_buffer, 1, BUFFER_SIZE - 1, fh);
+    fclose(fh);
+    file_buffer[bytes_read] = '\0';
+
+    // Create the HTTP response.
+    char *final_content =
+        (char *)malloc(bytes_read); // TODO, check if it's safe to do this
+    char *headers[] = {CONTENT_TYPE_APP};
+    send_response(client_fd, HTTP_200_OK, 1, headers, bytes_read, file_buffer,
+                  encode);
+
+  } else {
+    send_response(client_fd, HTTP_404_NOT_FOUND, 0, NULL, 0, "", encode);
+  }
+}
+
+char *extract_header_value(char *request, char *header) {
+  // Duplicate the request to avoid destroying the original
+  char *request_dup = strdup(request);
+  if (request_dup == NULL) {
+    return NULL;
+  }
+
+  char *saveptr;
+  char *line = strtok_r(request_dup, "\r\n", &saveptr);
+  char *header_value = NULL;
+
+  while (line != NULL) {
+    if (strncmp(line, header, strlen(header)) == 0) {
+
+      // Found the header; skip header name and whitespace
+      header_value = line + strlen(header);
+      while (*header_value == ' ' || *header_value == '\t') {
+        header_value++;
+      }
+
+      break;
+    }
+    line = strtok_r(NULL, "\r\n", &saveptr);
+  }
+  // Allocate a copy of the result if found.
+  char *header_return_value = header_value ? strdup(header_value) : NULL;
+  free(request_dup);
+  return header_return_value;
+}
+
+int gzip_compress(char *dest, size_t dest_len, char *source) {
+
+  int ret;
+  z_stream strm;
+
+  // Initialise z_stream struct
+  strm.zalloc = Z_NULL;
+  strm.zfree = Z_NULL;
+  strm.opaque = Z_NULL;
+  strm.avail_in = (uInt)strlen(source);
+  strm.next_in = (Bytef *)source;
+  strm.avail_out = (uInt)dest_len;
+  strm.next_out = (Bytef *)dest;
+
+  // Initialise deflate for gzip compression (15 | 16 produces gzip
+  // header/trailer)
+  ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 | 16, 8,
+                     Z_DEFAULT_STRATEGY);
+  if (ret != Z_OK) {
+    fprintf(stderr, "\033[31mDeflate initialize error: %d\033[0m\n", ret);
+    return -1;
+  }
+
+  // Deflate, assumes the entire source fits in one pass
+  // TODO use loop to avoid assumption
+  ret = deflate(&strm, Z_FINISH);
+  if (ret != Z_STREAM_END) {
+    fprintf(stderr, "\033[31mDeflate error: %d\033[0m\n", ret);
+    deflateEnd(&strm); // Clean up before returning
+    return -1;
+  }
+
+  // Clean up and return
+  (void)deflateEnd(&strm);
+  return strm.total_out;
+}
+
+void send_response(int client_fd, char *response_code, size_t headers_num,
+                   char *headers[], size_t content_size, char *content,
+                   bool encode) {
+  // Send response code
+  send_buffer(client_fd, response_code, strlen(response_code));
+
+  char content_encoded[BUFFER_SIZE];
+  if (encode) {
+    // Encode the content (gzip compression)
+    content_size = gzip_compress(content_encoded, BUFFER_SIZE, content);
+    if (content_size == -1) {
+      fprintf(stderr, "\033[31mCompression failed: %s\033[0m\n",
+              strerror(errno));
+      exit(1);
+    }
+  }
+
+  // Send headers, but first check if there are any
+  if (headers_num > 0 && headers != NULL) {
+    int i;
+    for (i = 0; i < headers_num; i++) {
+      send_buffer(client_fd, headers[i], strlen(headers[i]));
+    }
+
+    // Send content length header
+    char content_length[BUFFER_SIZE];
+    snprintf(content_length, BUFFER_SIZE, CONTENT_LENGTH, content_size);
+    send_buffer(client_fd, content_length, strlen(content_length));
+  }
+
+  // Send CRLF (end of headers)
+  send_buffer(client_fd, "\r\n", 2);
+
+  if (encode) {
+    // Send encoded content
+    send_buffer(client_fd, content_encoded, content_size);
+
+  } else {
+    // Send content
+    send_buffer(client_fd, content, content_size);
+  }
+}
+
+void send_buffer(int client_fd, char *buffer, size_t buffer_size) {
+  // Send a buffer with error handling
+  if (send(client_fd, buffer, buffer_size, 0) == -1) {
+    fprintf(stderr, "\033[31mSend failed: %s\033[0m\n", strerror(errno));
+    close(client_fd);
+    exit(1);
+  }
 }
