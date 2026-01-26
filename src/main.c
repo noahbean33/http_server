@@ -56,8 +56,8 @@ void *handle_client(void *arg) {
 	char *saveptr = NULL;
 	char *line_saveptr = NULL;
 	
-	http_method = strtok_r(request, "\r\n", &saveptr);
-	http_path = strtok_r(http_method, " ", &line_saveptr);
+	char *request_line = strtok_r(request, "\r\n", &saveptr);
+	http_method = strtok_r(request_line, " ", &line_saveptr);
 	http_path = strtok_r(NULL, " ", &line_saveptr);
 	
 	if (strcmp(http_path, "/") == 0)
@@ -107,30 +107,64 @@ void *handle_client(void *arg) {
 			snprintf(filepath, sizeof(filepath), "%s/%s", directory, filename);
 		}
 		
-		FILE *file = fopen(filepath, "rb");
-		if (file) {
-			fseek(file, 0, SEEK_END);
-			long file_size = ftell(file);
-			fseek(file, 0, SEEK_SET);
+		if (strcmp(http_method, "GET") == 0)
+		{
+			FILE *file = fopen(filepath, "rb");
+			if (file) {
+				fseek(file, 0, SEEK_END);
+				long file_size = ftell(file);
+				fseek(file, 0, SEEK_SET);
+				
+				char *file_content = malloc(file_size);
+				fread(file_content, 1, file_size, file);
+				fclose(file);
+				
+				char response[2048];
+				int header_len = snprintf(response, sizeof(response),
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: application/octet-stream\r\n"
+					"Content-Length: %ld\r\n"
+					"\r\n",
+					file_size);
+				
+				send(client_fd, response, header_len, 0);
+				send(client_fd, file_content, file_size, 0);
+				free(file_content);
+			} else {
+				char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
+				send(client_fd, response, strlen(response), 0);
+			}
+		}
+		else if (strcmp(http_method, "POST") == 0)
+		{
+			// Extract request body (after "\r\n\r\n")
+			char *body = strstr(saveptr, "\r\n\r\n");
+			if (body) {
+				body += 4; // Skip the "\r\n\r\n"
+			}
 			
-			char *file_content = malloc(file_size);
-			fread(file_content, 1, file_size, file);
-			fclose(file);
-			
-			char response[2048];
-			int header_len = snprintf(response, sizeof(response),
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/octet-stream\r\n"
-				"Content-Length: %ld\r\n"
-				"\r\n",
-				file_size);
-			
-			send(client_fd, response, header_len, 0);
-			send(client_fd, file_content, file_size, 0);
-			free(file_content);
-		} else {
-			char *response = "HTTP/1.1 404 Not Found\r\n\r\n";
-			send(client_fd, response, strlen(response), 0);
+			// Get Content-Length header
+			char *content_length_str = extract_header_value(saveptr, "Content-Length");
+			if (content_length_str && body) {
+				size_t content_length = atoi(content_length_str);
+				free(content_length_str);
+				
+				// Write file
+				FILE *file = fopen(filepath, "wb");
+				if (file) {
+					fwrite(body, 1, content_length, file);
+					fclose(file);
+					
+					char *response = "HTTP/1.1 201 Created\r\n\r\n";
+					send(client_fd, response, strlen(response), 0);
+				} else {
+					char *response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+					send(client_fd, response, strlen(response), 0);
+				}
+			} else {
+				char *response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+				send(client_fd, response, strlen(response), 0);
+			}
 		}
 	}
 	else
